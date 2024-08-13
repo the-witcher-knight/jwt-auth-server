@@ -8,10 +8,8 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/base64"
-	"encoding/pem"
 	"fmt"
 	"math/big"
-	"os"
 	"strings"
 	"time"
 )
@@ -39,12 +37,7 @@ type rsaSignatureService struct {
 	privateKey *rsa.PrivateKey
 }
 
-func NewRSASignatureService(privateKeyPath string) (SignatureService, error) {
-	privateKey, err := loadPrivateKeyFromPEMFile(privateKeyPath)
-	if err != nil {
-		return nil, err
-	}
-
+func NewRSASignatureService(privateKey *rsa.PrivateKey) (SignatureService, error) {
 	return rsaSignatureService{
 		privateKey: privateKey,
 	}, nil
@@ -111,36 +104,4 @@ func (hdl rsaSignatureService) GetJWKs() (JWKS, error) {
 func base64URLEncode(str []byte) string {
 	encoded := base64.URLEncoding.EncodeToString(str)
 	return strings.TrimRight(encoded, "=")
-}
-
-func base64URLDecode(encoded string) ([]byte, error) {
-	if l := len(encoded) % 4; l > 0 {
-		encoded += strings.Repeat("=", 4-l)
-	}
-
-	return base64.URLEncoding.DecodeString(encoded)
-}
-
-func loadPrivateKeyFromPEMFile(path string) (*rsa.PrivateKey, error) {
-	bytes, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("%w, failed to read private key from %s", err, path)
-	}
-
-	block, _ := pem.Decode(bytes) // Just have 1 block
-	if block == nil {
-		return nil, fmt.Errorf("%w, failed to parse PEM block", err)
-	}
-
-	pk, err := x509.ParsePKCS8PrivateKey(block.Bytes)
-	if err != nil {
-		return nil, fmt.Errorf("%w, failed to parse private", err)
-	}
-
-	rsaKey, ok := pk.(*rsa.PrivateKey)
-	if !ok {
-		return nil, fmt.Errorf("private key is not RSA")
-	}
-
-	return rsaKey, nil
 }

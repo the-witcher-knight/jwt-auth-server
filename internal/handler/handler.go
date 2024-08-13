@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"net/http"
 
-	"github.com/the-witcher-knight/jwt-encryption-server/internal/httpio"
+	"github.com/gin-gonic/gin"
+
+	"github.com/the-witcher-knight/jwt-encryption-server/internal/httpserver"
 	"github.com/the-witcher-knight/jwt-encryption-server/internal/service"
 )
 
@@ -36,10 +38,10 @@ func New(srv service.SignatureService) Handler {
 	}
 }
 
-func (h Handler) GenerateToken() http.Handler {
-	return httpio.HandleFunc(func(w http.ResponseWriter, r *http.Request) error {
-		req, err := httpio.ReadJSON[generateTokenRequest](r.Body)
-		if err != nil {
+func (h Handler) GenerateToken() gin.HandlerFunc {
+	return httpserver.ErrorHandler(func(ctx *gin.Context) error {
+		var req generateTokenRequest
+		if err := ctx.BindJSON(&req); err != nil {
 			return err
 		}
 
@@ -57,19 +59,21 @@ func (h Handler) GenerateToken() http.Handler {
 			return err
 		}
 
-		return httpio.WriteJSON(w, generateTokenResponse{
+		ctx.JSON(http.StatusOK, generateTokenResponse{
 			AccessToken: token,
 		})
+		return nil
 	})
 }
 
-func (h Handler) GetJWKs() http.Handler {
-	return httpio.HandleFunc(func(w http.ResponseWriter, r *http.Request) error {
+func (h Handler) GetJWKs() gin.HandlerFunc {
+	return httpserver.ErrorHandler(func(ctx *gin.Context) error {
 		jwks, err := h.srv.GetJWKs()
 		if err != nil {
 			return err
 		}
 
-		return httpio.WriteJSON(w, jwks)
+		ctx.JSON(http.StatusOK, jwks)
+		return nil
 	})
 }

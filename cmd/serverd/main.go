@@ -2,100 +2,91 @@ package main
 
 import (
 	"context"
-	"errors"
+	"crypto/rsa"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
-	"sync"
-	"syscall"
 	"time"
 
 	"github.com/the-witcher-knight/jwt-encryption-server/internal/handler"
-	"github.com/the-witcher-knight/jwt-encryption-server/internal/httpio"
-	"github.com/the-witcher-knight/jwt-encryption-server/internal/logging"
+	"github.com/the-witcher-knight/jwt-encryption-server/internal/httpserver"
+	"github.com/the-witcher-knight/jwt-encryption-server/internal/secrets"
 	"github.com/the-witcher-knight/jwt-encryption-server/internal/service"
+	"github.com/the-witcher-knight/jwt-encryption-server/internal/tracing"
 )
 
 const (
-	addr = ":8080"
+	addr           = ":8080"
+	privateKeyPath = "private-key.pem"
+)
+
+var (
+	logger = log.New(os.Stdout, "", log.LstdFlags|log.Lmicroseconds)
 )
 
 func main() {
-	ctx := context.Background()
-	if err := run(ctx); err != nil {
-		log.Printf("error %+v", err)
+	if err := run(); err != nil {
+		logger.Printf("server exited abnormally %+v", err)
 		os.Exit(1)
 	}
 }
 
-func run(ctx context.Context) error {
-	logger, err := logging.NewLogger()
+func run() error {
+	fileBytes, err := os.ReadFile(privateKeyPath)
 	if err != nil {
 		return err
 	}
 
-	signatureService, err := service.NewRSASignatureService("private-key.pem")
+	privateKey, err := secrets.LoadPrivateKeyFromPEM[*rsa.PrivateKey](fileBytes, "")
 	if err != nil {
 		return err
 	}
 
-	hdl := handler.New(signatureService)
-	mux := http.NewServeMux()
+	tracer := tracing.New()
+	defer func() {
+		if err := tracer.Flush(); err != nil {
+			logger.Printf("error flushing tracer: %+v", err)
+		}
+	}()
 
-	addRoutes(mux, logger, hdl)
+	svc, err := service.NewRSASignatureService(privateKey)
+	hdl := handler.New(svc)
 
-	ctx, stop := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
+	// Setup HTTP server
+	srv := &http.Server{
+		Addr:         addr,
+		ReadTimeout:  time.Second,
+		WriteTimeout: 10 * time.Second,
+		Handler:      newHTTPHandler(tracing.SetInContext(context.Background(), tracer), hdl),
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
-	return startServer(ctx, logger, mux)
-}
-
-func startServer(ctx context.Context, logger *logging.Logger, mux *http.ServeMux) error {
-	srv := &http.Server{
-		Addr:    addr,
-		Handler: mux,
-	}
-
-	gctx, gcancel := context.WithCancelCause(ctx)
-	wg := new(sync.WaitGroup)
-
-	wg.Add(1)
+	srvErr := make(chan error, 1)
 	go func() {
-		defer wg.Done()
-
-		logger.Info(context.Background(), "starting server at port "+addr)
-		if err := srv.ListenAndServe(); err != nil {
-			if !errors.Is(err, http.ErrServerClosed) {
-				gcancel(err)
-			}
-		}
+		srvErr <- srv.ListenAndServe()
 	}()
 
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-
-		<-gctx.Done()
-
-		logger.Info(context.Background(), "shutting down server")
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-
-		if err := srv.Shutdown(ctx); err != nil {
-			gcancel(err)
-		}
-	}()
-
-	wg.Wait()
-	if err := context.Cause(gctx); err != nil && !errors.Is(err, context.Canceled) {
+	// Wait for interruption
+	select {
+	case err := <-srvErr:
+		// Error when starting HTTP server
 		return err
+	case <-ctx.Done():
+		stop()
 	}
 
-	return nil
+	return srv.Shutdown(context.Background())
 }
 
-func addRoutes(mux *http.ServeMux, logger *logging.Logger, hdl handler.Handler) {
-	mux.Handle("/token", httpio.RootMiddleware(logger)(hdl.GenerateToken()))
-	mux.Handle("/.well-known/jwks.json", httpio.RootMiddleware(logger)(hdl.GetJWKs()))
+func newHTTPHandler(rootCtx context.Context, hdl handler.Handler) http.Handler {
+	router := httpserver.NewRouter(rootCtx)
+
+	// Register handlers
+	router.POST("/token", hdl.GenerateToken())
+	router.GET("/.well-known/jwks.json", hdl.GetJWKs())
+
+	return router
 }
